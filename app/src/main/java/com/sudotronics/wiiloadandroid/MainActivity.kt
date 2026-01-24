@@ -31,6 +31,10 @@ import java.util.concurrent.Executors
 import java.util.zip.Deflater
 import kotlin.math.min
 import androidx.activity.result.contract.ActivityResultContracts
+import com.google.android.material.chip.Chip
+import com.google.android.material.chip.ChipGroup
+import org.json.JSONArray
+import org.json.JSONObject
 
 
 class MainActivity : AppCompatActivity() {
@@ -44,12 +48,21 @@ class MainActivity : AppCompatActivity() {
     private val executorService: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var themeToggle: ImageButton? = null
+    private var recentFilesGroup: ChipGroup? = null
 
     private val filePicker = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result: ActivityResult ->
         if (result.resultCode == RESULT_OK && result.data != null) {
-            handleFileSelection(result.data!!.data)
+            val uri = result.data!!.data
+            if (uri != null) {
+                val takeFlags = result.data!!.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                try {
+                    contentResolver.takePersistableUriPermission(uri, takeFlags)
+                } catch (_: SecurityException) {
+                }
+                handleFileSelection(uri)
+            }
         }
     }
 
@@ -75,11 +88,13 @@ class MainActivity : AppCompatActivity() {
         progressDialog!!.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL)
         progressDialog!!.setCancelable(false)
         themeToggle = findViewById<ImageButton>(R.id.themeToggle)
+        recentFilesGroup = findViewById(R.id.recentFilesGroup)
     }
 
     private fun setupPreferences() {
         val savedIP = preferences!!.getString(LAST_IP_KEY, "")
         ipAddressField!!.setText(savedIP)
+        restoreRecentChips()
     }
 
     private fun verifyPermissions() {
@@ -100,9 +115,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun launchFilePicker() {
-        val intent = Intent(Intent.ACTION_GET_CONTENT)
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
         intent.setType("*/*")
         intent.addCategory(Intent.CATEGORY_OPENABLE)
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         filePicker.launch(intent)
     }
 
@@ -240,6 +256,11 @@ class MainActivity : AppCompatActivity() {
         mainHandler.post {
             progressDialog!!.dismiss()
             showMessage("Transfer completed successfully!")
+            val name = getFileName(selectedFile)
+            addRecentFileChip(name, selectedFile)
+            if (name != null && selectedFile != null) {
+                addRecentFilePersistent(name, selectedFile.toString())
+            }
         }
     }
 
@@ -295,5 +316,67 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "BeamUPrefs"
         private const val LAST_IP_KEY = "lastUsedIP"
         private const val THEME_PREF_KEY = "theme_mode"
+        private const val RECENT_FILES_KEY = "recent_files"
+    }
+
+    private fun addRecentFileChip(name: String?, uri: Uri?) {
+        if (name == null || uri == null) return
+        val chip = Chip(this)
+        chip.text = name
+        chip.isClickable = true
+        chip.setOnClickListener {
+            selectedFile = uri
+            statusText?.text = name
+            transmitButton?.isEnabled = true
+        }
+        chip.setOnLongClickListener {
+            removeRecentFilePersistent(name, uri.toString())
+            recentFilesGroup?.removeView(chip)
+            true
+        }
+        recentFilesGroup?.addView(chip)
+    }
+
+    private fun restoreRecentChips() {
+        val json = preferences!!.getString(RECENT_FILES_KEY, "[]") ?: "[]"
+        val arr = JSONArray(json)
+        for (i in 0 until arr.length()) {
+            val obj = arr.getJSONObject(i)
+            val name = obj.getString("name")
+            val uri = Uri.parse(obj.getString("uri"))
+            addRecentFileChip(name, uri)
+        }
+    }
+
+    private fun addRecentFilePersistent(name: String, uri: String) {
+        val arr = JSONArray(preferences!!.getString(RECENT_FILES_KEY, "[]") ?: "[]")
+        val existing = JSONArray()
+        for (i in 0 until arr.length()) {
+            val obj = arr.getJSONObject(i)
+            if (obj.getString("uri") != uri) {
+                existing.put(obj)
+            }
+        }
+        val newObj = JSONObject()
+        newObj.put("name", name)
+        newObj.put("uri", uri)
+        val result = JSONArray()
+        result.put(newObj)
+        for (i in 0 until existing.length()) {
+            result.put(existing.getJSONObject(i))
+        }
+        preferences!!.edit().putString(RECENT_FILES_KEY, result.toString()).apply()
+    }
+
+    private fun removeRecentFilePersistent(name: String, uri: String) {
+        val arr = JSONArray(preferences!!.getString(RECENT_FILES_KEY, "[]") ?: "[]")
+        val result = JSONArray()
+        for (i in 0 until arr.length()) {
+            val obj = arr.getJSONObject(i)
+            if (obj.getString("uri") != uri) {
+                result.put(obj)
+            }
+        }
+        preferences!!.edit().putString(RECENT_FILES_KEY, result.toString()).apply()
     }
 }
