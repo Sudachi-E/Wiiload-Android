@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.OpenableColumns
 import android.view.MenuItem
 import android.view.View
 import android.widget.Button
@@ -75,6 +76,7 @@ class MainActivity : AppCompatActivity() {
         setupPreferences()
         verifyPermissions()
         setupClickListeners()
+        handleIncomingIntent(intent)
     }
 
     private fun initializeViews() {
@@ -122,6 +124,31 @@ class MainActivity : AppCompatActivity() {
         filePicker.launch(intent)
     }
 
+    private fun handleIncomingIntent(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.action
+        var uri: Uri? = null
+        if (Intent.ACTION_VIEW == action) {
+            uri = intent.data
+        } else if (Intent.ACTION_SEND == action) {
+            uri = intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        }
+        if (uri != null) {
+            var modeFlags = 0
+            if ((intent.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0) {
+                modeFlags = modeFlags or Intent.FLAG_GRANT_READ_URI_PERMISSION
+            }
+            if ((intent.flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != 0) {
+                modeFlags = modeFlags or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            }
+            try {
+                contentResolver.takePersistableUriPermission(uri, modeFlags)
+            } catch (_: SecurityException) {
+            }
+            handleFileSelection(uri)
+        }
+    }
+
     private fun handleFileSelection(uri: Uri?) {
         selectedFile = uri
         val fileName = getFileName(uri)
@@ -130,10 +157,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getFileName(uri: Uri?): String? {
-        var result = uri!!.lastPathSegment
-        val cut = result!!.lastIndexOf('/')
-        if (cut != -1) {
-            result = result.substring(cut + 1)
+        if (uri == null) return null
+        var result: String? = null
+        if ("content".equals(uri.scheme, ignoreCase = true)) {
+            val cursor = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    result = it.getString(it.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME))
+                }
+            }
+        }
+        if (result == null) {
+            val path = uri.path
+            if (path != null) {
+                val cut = path.lastIndexOf('/')
+                result = if (cut != -1) path.substring(cut + 1) else path
+            }
         }
         return result
     }
@@ -172,10 +211,13 @@ class MainActivity : AppCompatActivity() {
         val buffer = ByteArray(BUFFER_SIZE)
 
         contentResolver.openInputStream(selectedFile!!).use { inputStream ->
-            val totalBytes = inputStream!!.available()
+            val totalBytes = getOriginalSize(selectedFile!!)
+            var readSoFar = 0
             var bytesRead: Int
-            while ((inputStream.read(buffer).also { bytesRead = it }) != -1) {
+            val stream = inputStream!!
+            while ((stream.read(buffer).also { bytesRead = it }) != -1) {
                 deflater.setInput(buffer, 0, bytesRead)
+                readSoFar += bytesRead
 
                 val compressedBuffer =
                     ByteArray(BUFFER_SIZE)
@@ -186,7 +228,7 @@ class MainActivity : AppCompatActivity() {
 
                 updateProgress(
                     "Compressing...",
-                    (compressedStream.size() * 100L / totalBytes).toInt()
+                    if (totalBytes > 0) (readSoFar * 100L / totalBytes).toInt() else 0
                 )
             }
 
@@ -232,17 +274,14 @@ class MainActivity : AppCompatActivity() {
 
     @Throws(IOException::class)
     private fun writeHeader(output: DataOutputStream, fileName: String?, compressedLength: Int) {
-        output.writeBytes("1027") // magic number
+        output.writeBytes("HAXX")
         output.writeByte(0) // max version
         output.writeByte(5) // min version
-        output.writeShort(fileName!!.length + 1)
+        val argsLen = (fileName ?: "").toByteArray().size + 1
+        output.writeShort(argsLen)
         output.writeInt(compressedLength)
-
-        contentResolver.openInputStream(selectedFile!!).use { inputStream ->
-            output.writeInt(
-                inputStream!!.available()
-            ) // original size
-        }
+        val originalSize = getOriginalSize(selectedFile!!)
+        output.writeInt(originalSize)
     }
 
     private fun updateProgress(message: String, progress: Int) {
@@ -305,6 +344,11 @@ class MainActivity : AppCompatActivity() {
         AppCompatDelegate.setDefaultNightMode(savedTheme)
     }
 
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         executorService.shutdown()
@@ -317,6 +361,23 @@ class MainActivity : AppCompatActivity() {
         private const val LAST_IP_KEY = "lastUsedIP"
         private const val THEME_PREF_KEY = "theme_mode"
         private const val RECENT_FILES_KEY = "recent_files"
+    }
+
+    private fun getOriginalSize(uri: Uri): Int {
+        val pfd = contentResolver.openFileDescriptor(uri, "r")
+        pfd?.use {
+            if (it.statSize >= 0) return it.statSize.toInt()
+        }
+        contentResolver.openInputStream(uri)?.use { input ->
+            var total = 0
+            val buf = ByteArray(BUFFER_SIZE)
+            var r: Int
+            while ((input.read(buf).also { r = it }) != -1) {
+                total += r
+            }
+            return total
+        }
+        return 0
     }
 
     private fun addRecentFileChip(name: String?, uri: Uri?) {
